@@ -477,6 +477,7 @@ umbraco-package-schema.json
 
 # Log files
 /umbraco/Logs/
+/usync/
 
 # Media files
 /wwwroot/media/
