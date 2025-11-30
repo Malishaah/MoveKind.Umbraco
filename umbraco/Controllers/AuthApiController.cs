@@ -2,6 +2,7 @@ using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Umbraco.Cms.Core.Models;
 using Umbraco.Cms.Core.Services;
+using Umbraco.Cms.Core.Web;
 using Umbraco.Cms.Web.Common.Security;
 using Umbraco.Cms.Core.Security; // <-- behövs för MemberIdentityUser, IMemberManager, IMemberSignInManager
 
@@ -15,7 +16,8 @@ public class AuthApiController : ControllerBase
     private readonly MemberManager _memberManager;
     private readonly MemberSignInManager _signInManager;
     private readonly IMemberService _memberService;
-
+    private readonly IRelationService _relationService;
+    private readonly IUmbracoContextFactory _umbracoContextFactory;
     // Dina Member-property-alias:
     private const string Alias_LargerText        = "largerText";
     private const string Alias_HighContrast      = "highContrast";
@@ -23,15 +25,20 @@ public class AuthApiController : ControllerBase
     private const string Alias_CaptionsDefault   = "captionsDefault";
     private const string Alias_RemindersEnabled  = "remindersEnabled";
     private const string Alias_DefaultReminder   = "defaultReminderTime";
+    private const string RelationAlias = "memberFavoritesWorkout";
 
     public AuthApiController(
         MemberManager memberManager,
         MemberSignInManager signInManager,
-        IMemberService memberService)
+        IMemberService memberService,
+        IRelationService relationService,
+        IUmbracoContextFactory umbracoContextFactory)
     {
         _memberManager  = memberManager;
         _signInManager  = signInManager;
         _memberService  = memberService;
+        _relationService = relationService;
+        _umbracoContextFactory = umbracoContextFactory;
     }
 
     // ---------- DTOs ----------
@@ -149,7 +156,35 @@ public class AuthApiController : ControllerBase
 
         return Ok(new { ok = true });
     }
+    [HttpGet("GetFavorites")]
+    public async Task<IActionResult> GetFavorites()
+    {
+        var current = await _memberManager.GetCurrentMemberAsync();
+        if (current is null) return Unauthorized();
 
+        var m = _memberService.GetByKey(current.Key) ?? throw new InvalidOperationException("Member not found.");
+
+        // fetch all relations for parent, then filter by our alias
+        var rels = (_relationService.GetByParentId(m.Id) ?? Enumerable.Empty<IRelation>())
+            .Where(r => r.RelationType?.Alias == RelationAlias);
+
+        var ids = rels.Select(r => r.ChildId).Distinct().ToArray();
+
+        using var cref = _umbracoContextFactory.EnsureUmbracoContext();
+        var contentCache = cref.UmbracoContext.Content;
+
+        var nodes = ids
+            .Select(id => contentCache?.GetById(id))
+            .Where(n => n is not null)
+            .Select(n => new
+            {
+                id = n!.Id,
+                name = n!.Name,
+                url = n!.Url()
+            });
+
+        return Ok(nodes);
+    }
     // ---------- Byt lösen ----------
     [HttpPost("change-password")]
     public async Task<IActionResult> ChangePassword([FromBody] ChangePasswordDto dto)
