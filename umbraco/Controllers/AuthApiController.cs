@@ -1,11 +1,11 @@
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Umbraco.Cms.Core.Models;
+using Umbraco.Cms.Core.Security;
 using Umbraco.Cms.Core.Services;
 using Umbraco.Cms.Core.Web;
 using Umbraco.Cms.Web.Common.Security;
-using Umbraco.Cms.Core.Security; // <-- behövs för MemberIdentityUser, IMemberManager, IMemberSignInManager
-
+using Umbraco.Extensions;
 
 namespace MoveKind.Umbraco.Controllers;
 
@@ -18,13 +18,16 @@ public class AuthApiController : ControllerBase
     private readonly IMemberService _memberService;
     private readonly IRelationService _relationService;
     private readonly IUmbracoContextFactory _umbracoContextFactory;
-    // Dina Member-property-alias:
-    private const string Alias_LargerText        = "largerText";
-    private const string Alias_HighContrast      = "highContrast";
-    private const string Alias_LightMode         = "lightMode";
-    private const string Alias_CaptionsDefault   = "captionsDefault";
-    private const string Alias_RemindersEnabled  = "remindersEnabled";
-    private const string Alias_DefaultReminder   = "defaultReminderTime";
+
+    // ✅ Member-property-alias (MÅSTE matcha Umbraco Member Type aliases exakt)
+    private const string Alias_LargerText = "largerText";
+    private const string Alias_HighContrast = "highContrast";
+    private const string Alias_LightMode = "lightMode";
+    private const string Alias_CaptionsOnByDefault = "captionsOnByDefault";
+    private const string Alias_RemindersEnabled = "remindersEnabled";
+    private const string Alias_DefaultReminderTime = "defaultReminderTime";
+
+    // Favorites relation
     private const string RelationAlias = "memberFavoritesWorkout";
 
     public AuthApiController(
@@ -34,9 +37,9 @@ public class AuthApiController : ControllerBase
         IRelationService relationService,
         IUmbracoContextFactory umbracoContextFactory)
     {
-        _memberManager  = memberManager;
-        _signInManager  = signInManager;
-        _memberService  = memberService;
+        _memberManager = memberManager;
+        _signInManager = signInManager;
+        _memberService = memberService;
         _relationService = relationService;
         _umbracoContextFactory = umbracoContextFactory;
     }
@@ -44,6 +47,7 @@ public class AuthApiController : ControllerBase
     // ---------- DTOs ----------
     public record RegisterDto(string Email, string Password, string? Username, string? Name);
     public record LoginDto(string UsernameOrEmail, string Password, bool RememberMe = true);
+
     public record ProfileDto(
         string Email,
         string Name,
@@ -52,39 +56,84 @@ public class AuthApiController : ControllerBase
         bool LightMode,
         bool CaptionsOnByDefault,
         bool RemindersEnabled,
-        string DefaultReminderTime
+        string DefaultReminderTime // "HH:mm"
     );
+
     public record ChangePasswordDto(string CurrentPassword, string NewPassword);
+
+    // ---------- Helpers ----------
+    private static bool HasProperty(IContentBase c, string alias)
+        => c.Properties?.Any(p => p.Alias.Equals(alias, StringComparison.OrdinalIgnoreCase)) == true;
+
+    private static string NormalizeTimeHHmm(string? value, string fallback = "08:00")
+    {
+        var v = (value ?? "").Trim();
+        if (string.IsNullOrWhiteSpace(v)) return fallback;
+
+        // Accept HH:mm only
+        if (System.Text.RegularExpressions.Regex.IsMatch(v, @"^\d{2}:\d{2}$"))
+            return v;
+
+        return fallback;
+    }
+
+    private static T? SafeGetValue<T>(IContentBase c, string alias)
+    {
+        if (!HasProperty(c, alias)) return default;
+        return c.GetValue<T>(alias);
+    }
+
+    private static void SafeSetValue(IContentBase c, string alias, object? value)
+    {
+        if (!HasProperty(c, alias)) return;
+        c.SetValue(alias, value);
+    }
+
+    private async Task<IMember?> GetCurrentMemberEntityAsync()
+    {
+        var current = await _memberManager.GetCurrentMemberAsync();
+        if (current is null) return null;
+
+        // current.Key är säkrast i Umbraco 13+
+        return _memberService.GetByKey(current.Key);
+    }
 
     // ---------- Register ----------
     [HttpPost("register")]
     [AllowAnonymous]
     public async Task<IActionResult> Register([FromBody] RegisterDto dto)
     {
-        var username = string.IsNullOrWhiteSpace(dto.Username) ? dto.Email : dto.Username!;
+        var username = string.IsNullOrWhiteSpace(dto.Username) ? dto.Email : dto.Username!.Trim();
 
-        // Skapa identitetsanvändare (kopplas till MemberType "member", byt vid behov)
+        // Member type alias: "member" (ändra om din heter något annat)
         var identityUser = MemberIdentityUser.CreateNew(username, dto.Email, "member", isApproved: true);
 
         var createResult = await _memberManager.CreateAsync(identityUser, dto.Password);
         if (!createResult.Succeeded)
-            return BadRequest(new { ok = false, errors = createResult.Errors.Select(e => e.Description) });
+        {
+            return BadRequest(new
+            {
+                ok = false,
+                errors = createResult.Errors.Select(e => e.Description)
+            });
+        }
 
-        // Sätt Name + ev defaultinställningar på IMember
+        // Sätt Name + defaults på IMember
         var m = _memberService.GetByKey(identityUser.Key);
         if (m is not null)
         {
-            if (!string.IsNullOrWhiteSpace(dto.Name)) m.Name = dto.Name!;
-            // Defaultvärden om du vill:
-            m.SetValue(Alias_DefaultReminder, "08:00");
+            if (!string.IsNullOrWhiteSpace(dto.Name))
+                m.Name = dto.Name!.Trim();
+
+            // defaultReminderTime ska vara string "HH:mm" (inte DateTime)
+            SafeSetValue(m, Alias_DefaultReminderTime, "08:00");
+
             _memberService.Save(m);
         }
 
-        // Autologga in (OBS: använd PasswordSignInAsync)
+        // Auto-login
         var signIn = await _signInManager.PasswordSignInAsync(username, dto.Password, isPersistent: true, lockoutOnFailure: false);
-        if (!signIn.Succeeded) return Ok(new { ok = true, username, autoSignedIn = false });
-
-        return Ok(new { ok = true, username, autoSignedIn = true });
+        return Ok(new { ok = true, username, autoSignedIn = signIn.Succeeded });
     }
 
     // ---------- Login ----------
@@ -92,7 +141,7 @@ public class AuthApiController : ControllerBase
     [AllowAnonymous]
     public async Task<IActionResult> Login([FromBody] LoginDto dto)
     {
-        // tillåt e-post eller användarnamn
+        // tillåt e-post eller username
         var byEmail = _memberService.GetByEmail(dto.UsernameOrEmail);
         var userName = byEmail?.Username ?? dto.UsernameOrEmail;
 
@@ -114,20 +163,18 @@ public class AuthApiController : ControllerBase
     [HttpGet("me")]
     public async Task<IActionResult> Me()
     {
-        var current = await _memberManager.GetCurrentMemberAsync();
-        if (current is null) return Unauthorized();
-
-        var m = _memberService.GetByKey(current.Key) ?? throw new InvalidOperationException("Member not found.");
+        var m = await GetCurrentMemberEntityAsync();
+        if (m is null) return Unauthorized();
 
         var dto = new ProfileDto(
             Email: m.Email ?? "",
-            Name:  m.Name ?? "",
-            LargerText:           m.GetValue<bool?>(Alias_LargerText)        ?? false,
-            HighContrast:         m.GetValue<bool?>(Alias_HighContrast)      ?? false,
-            LightMode:            m.GetValue<bool?>(Alias_LightMode)         ?? false,
-            CaptionsOnByDefault:  m.GetValue<bool?>(Alias_CaptionsDefault)   ?? false,
-            RemindersEnabled:     m.GetValue<bool?>(Alias_RemindersEnabled)  ?? false,
-            DefaultReminderTime:  m.GetValue<string>(Alias_DefaultReminder)  ?? "08:00"
+            Name: m.Name ?? "",
+            LargerText: SafeGetValue<bool?>(m, Alias_LargerText) ?? false,
+            HighContrast: SafeGetValue<bool?>(m, Alias_HighContrast) ?? false,
+            LightMode: SafeGetValue<bool?>(m, Alias_LightMode) ?? false,
+            CaptionsOnByDefault: SafeGetValue<bool?>(m, Alias_CaptionsOnByDefault) ?? false,
+            RemindersEnabled: SafeGetValue<bool?>(m, Alias_RemindersEnabled) ?? false,
+            DefaultReminderTime: NormalizeTimeHHmm(SafeGetValue<string>(m, Alias_DefaultReminderTime) ?? "08:00")
         );
 
         return Ok(dto);
@@ -137,34 +184,35 @@ public class AuthApiController : ControllerBase
     [HttpPut("me")]
     public async Task<IActionResult> UpdateMe([FromBody] ProfileDto dto)
     {
-        var current = await _memberManager.GetCurrentMemberAsync();
-        if (current is null) return Unauthorized();
+        var m = await GetCurrentMemberEntityAsync();
+        if (m is null) return Unauthorized();
 
-        var m = _memberService.GetByKey(current.Key) ?? throw new InvalidOperationException("Member not found.");
+        // Uppdatera grundfält
+        if (!string.IsNullOrWhiteSpace(dto.Name)) m.Name = dto.Name.Trim();
+        if (!string.IsNullOrWhiteSpace(dto.Email)) m.Email = dto.Email.Trim();
 
-        if (!string.IsNullOrWhiteSpace(dto.Name))  m.Name  = dto.Name;
-        if (!string.IsNullOrWhiteSpace(dto.Email)) m.Email = dto.Email;
+        // Uppdatera bara om property finns
+        SafeSetValue(m, Alias_LargerText, dto.LargerText);
+        SafeSetValue(m, Alias_HighContrast, dto.HighContrast);
+        SafeSetValue(m, Alias_LightMode, dto.LightMode);
+        SafeSetValue(m, Alias_CaptionsOnByDefault, dto.CaptionsOnByDefault);
+        SafeSetValue(m, Alias_RemindersEnabled, dto.RemindersEnabled);
 
-        m.SetValue(Alias_LargerText,       dto.LargerText);
-        m.SetValue(Alias_HighContrast,     dto.HighContrast);
-        m.SetValue(Alias_LightMode,        dto.LightMode);
-        m.SetValue(Alias_CaptionsDefault,  dto.CaptionsOnByDefault);
-        m.SetValue(Alias_RemindersEnabled, dto.RemindersEnabled);
-        m.SetValue(Alias_DefaultReminder,  string.IsNullOrWhiteSpace(dto.DefaultReminderTime) ? "08:00" : dto.DefaultReminderTime);
+        // ⚠️ Viktigt: defaultReminderTime är string "HH:mm"
+        SafeSetValue(m, Alias_DefaultReminderTime, NormalizeTimeHHmm(dto.DefaultReminderTime, "8:00"));
 
         _memberService.Save(m);
 
         return Ok(new { ok = true });
     }
-    [HttpGet("GetFavorites")]
+
+    // ---------- Favorites (GET) ----------
+    [HttpGet("favorites")]
     public async Task<IActionResult> GetFavorites()
     {
-        var current = await _memberManager.GetCurrentMemberAsync();
-        if (current is null) return Unauthorized();
+        var m = await GetCurrentMemberEntityAsync();
+        if (m is null) return Unauthorized();
 
-        var m = _memberService.GetByKey(current.Key) ?? throw new InvalidOperationException("Member not found.");
-
-        // fetch all relations for parent, then filter by our alias
         var rels = (_relationService.GetByParentId(m.Id) ?? Enumerable.Empty<IRelation>())
             .Where(r => r.RelationType?.Alias == RelationAlias);
 
@@ -179,13 +227,15 @@ public class AuthApiController : ControllerBase
             .Select(n => new
             {
                 id = n!.Id,
+                key = n!.Key,
                 name = n!.Name,
                 url = n!.Url()
             });
 
         return Ok(nodes);
     }
-    // ---------- Byt lösen ----------
+
+    // ---------- Change password ----------
     [HttpPost("change-password")]
     public async Task<IActionResult> ChangePassword([FromBody] ChangePasswordDto dto)
     {
@@ -194,9 +244,15 @@ public class AuthApiController : ControllerBase
 
         var result = await _memberManager.ChangePasswordAsync(current, dto.CurrentPassword, dto.NewPassword);
         if (!result.Succeeded)
-            return BadRequest(new { ok = false, errors = result.Errors.Select(e => e.Description) });
+        {
+            return BadRequest(new
+            {
+                ok = false,
+                errors = result.Errors.Select(e => e.Description)
+            });
+        }
 
-        // uppdatera autentisering/cookies
+        // uppdatera cookies
         await _signInManager.SignInAsync(current, isPersistent: true);
 
         return Ok(new { ok = true });
