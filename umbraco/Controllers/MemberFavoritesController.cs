@@ -160,13 +160,22 @@ namespace MoveKind.Umbraco.Controllers
             var memberId = await GetCurrentMemberIdAsync();
             if (memberId is null) return Unauthorized();
 
-            var ids = (_relationService.GetByParentId(memberId.Value) ?? Enumerable.Empty<IRelation>())
-                .Where(r => r.RelationType?.Alias == RelationAlias)
-                .Select(r => r.Key)
+            var rels = (_relationService.GetByParentId(memberId.Value) ?? Enumerable.Empty<IRelation>())
+                .Where(r => r.RelationType?.Alias == RelationAlias);
+
+            var ids = rels.Select(r => r.ChildId).Distinct().ToArray();
+
+            using var cref = _umbracoContextFactory.EnsureUmbracoContext();
+            var cache = cref.UmbracoContext.Content;
+
+            var keys = ids
+                .Select(id => cache?.GetById(id)?.Key)
+                .Where(k => k.HasValue)
+                .Select(k => k!.Value.ToString())
                 .Distinct()
                 .ToArray();
 
-            return Ok(ids);
+            return Ok(keys);
         }
 
         // Lägg till favorit (workoutId kan vara int/guid/udi)

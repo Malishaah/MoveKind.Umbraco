@@ -6,6 +6,7 @@ using Umbraco.Cms.Core.Services;
 using Umbraco.Cms.Core.Web;
 using Umbraco.Cms.Web.Common.Security;
 using Umbraco.Extensions;
+using System.Text.Json;
 
 namespace MoveKind.Umbraco.Controllers;
 
@@ -24,7 +25,7 @@ public class AuthApiController : ControllerBase
     private const string Alias_HighContrast = "highContrast";
     private const string Alias_LightMode = "lightMode";
     private const string Alias_CaptionsOnByDefault = "captionsOnByDefault";
-    private const string Alias_RemindersEnabled = "remindersEnabled";
+    private const string Alias_RemindersEnabled = "enableReminders";
     private const string Alias_DefaultReminderTime = "defaultReminderTime";
 
     // Favorites relation
@@ -56,7 +57,7 @@ public class AuthApiController : ControllerBase
         bool LightMode,
         bool CaptionsOnByDefault,
         bool RemindersEnabled,
-        string DefaultReminderTime // "HH:mm"
+        string DefaultReminderTime  // "HH:mm"
     );
 
     public record ChangePasswordDto(string CurrentPassword, string NewPassword);
@@ -70,12 +71,24 @@ public class AuthApiController : ControllerBase
         var v = (value ?? "").Trim();
         if (string.IsNullOrWhiteSpace(v)) return fallback;
 
-        // Accept HH:mm only
+        // om lagrat som JSON-string: "08:00"
+        if (v.StartsWith("\"") && v.EndsWith("\"") && v.Length >= 2)
+            v = v.Trim('"');
+
+        // om någon råkat spara datetime
+        if (DateTime.TryParse(v, out var dt))
+            return dt.ToString("HH:mm");
+
+        if (System.Text.RegularExpressions.Regex.IsMatch(v, @"^\d{2}:\d{2}:\d{2}$"))
+            return v.Substring(0, 5);
+
         if (System.Text.RegularExpressions.Regex.IsMatch(v, @"^\d{2}:\d{2}$"))
             return v;
 
         return fallback;
     }
+
+
 
     private static T? SafeGetValue<T>(IContentBase c, string alias)
     {
@@ -173,12 +186,15 @@ public class AuthApiController : ControllerBase
             HighContrast: SafeGetValue<bool?>(m, Alias_HighContrast) ?? false,
             LightMode: SafeGetValue<bool?>(m, Alias_LightMode) ?? false,
             CaptionsOnByDefault: SafeGetValue<bool?>(m, Alias_CaptionsOnByDefault) ?? false,
+
             RemindersEnabled: SafeGetValue<bool?>(m, Alias_RemindersEnabled) ?? false,
-            DefaultReminderTime: NormalizeTimeHHmm(SafeGetValue<string>(m, Alias_DefaultReminderTime) ?? "08:00")
+            DefaultReminderTime: NormalizeTimeHHmm(SafeGetValue<string>(m, Alias_DefaultReminderTime), "08:00")
+
         );
 
         return Ok(dto);
     }
+
 
     // ---------- Me (PUT) ----------
     [HttpPut("me")]
@@ -187,24 +203,26 @@ public class AuthApiController : ControllerBase
         var m = await GetCurrentMemberEntityAsync();
         if (m is null) return Unauthorized();
 
-        // Uppdatera grundfält
         if (!string.IsNullOrWhiteSpace(dto.Name)) m.Name = dto.Name.Trim();
         if (!string.IsNullOrWhiteSpace(dto.Email)) m.Email = dto.Email.Trim();
 
-        // Uppdatera bara om property finns
         SafeSetValue(m, Alias_LargerText, dto.LargerText);
         SafeSetValue(m, Alias_HighContrast, dto.HighContrast);
         SafeSetValue(m, Alias_LightMode, dto.LightMode);
         SafeSetValue(m, Alias_CaptionsOnByDefault, dto.CaptionsOnByDefault);
+
+        // OBS: Alias måste matcha backoffice (se nedan)
         SafeSetValue(m, Alias_RemindersEnabled, dto.RemindersEnabled);
 
-        // ⚠️ Viktigt: defaultReminderTime är string "HH:mm"
-        SafeSetValue(m, Alias_DefaultReminderTime, NormalizeTimeHHmm(dto.DefaultReminderTime, "8:00"));
+        // ✅ TimeOnly: spara som JSON-string, t.ex. "\"08:00\""
+        var time = NormalizeTimeHHmm(dto.DefaultReminderTime, "08:00");
+        SafeSetValue(m, Alias_DefaultReminderTime, JsonSerializer.Serialize(time));
 
         _memberService.Save(m);
 
         return Ok(new { ok = true });
     }
+
 
     // ---------- Favorites (GET) ----------
     [HttpGet("favorites")]
