@@ -1,8 +1,6 @@
 using Umbraco.Cms.Core.Composing;
 using Umbraco.Cms.Infrastructure.Runtime.RuntimeModeValidators;
-
-namespace MoveKind.Umbraco.DockerChecksRemover;
-
+namespace MoveKind.Umbraco.Composers;
 public class DockerChecksRemover : IComposer
 {
     public void Compose(IUmbracoBuilder builder)
