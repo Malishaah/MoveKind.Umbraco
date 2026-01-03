@@ -1,0 +1,103 @@
+pipeline {
+  agent any
+
+  environment {
+    REGISTRY = "docker.io"
+    DOCKERHUB_NAMESPACE = "melisarsh"
+
+    API_IMAGE = "${DOCKERHUB_NAMESPACE}/movekind-api"
+    WEB_IMAGE = "${DOCKERHUB_NAMESPACE}/movekind-web"
+
+    // Server deploy
+    DEPLOY_HOST = "${host}"
+    DEPLOY_USER = "${deployuser}"
+    DEPLOY_PATH = "/opt/movekind"
+
+    // Jenkins credentials IDs
+    REGISTRY_CREDS = "${docker-registry-creds}"
+    SSH_KEY_CREDS  = "${deploy-ssh-key}"
+  }
+
+  options {
+    timestamps()
+    disableConcurrentBuilds()
+  }
+
+  stages {
+    stage("Checkout") {
+      steps {
+        checkout scm
+      }
+    }
+
+    stage("Set tags") {
+      steps {
+        script {
+          env.TAG = "${env.BUILD_NUMBER}"
+        }
+      }
+    }
+
+    stage("Build images") {
+      steps {
+        sh """
+          docker build -t ${API_IMAGE}:${TAG} -t ${API_IMAGE}:latest -f MoveKind.Umbraco/Dockerfile .
+          docker build -t ${WEB_IMAGE}:${TAG} -t ${WEB_IMAGE}:latest -f movekind.web/Dockerfile .
+        """
+      }
+    }
+
+    stage("Push images") {
+      steps {
+        withCredentials([usernamePassword(credentialsId: "${REGISTRY_CREDS}", usernameVariable: 'DOCKER_USER', passwordVariable: 'DOCKER_PASS')]) {
+          sh """
+            echo "$DOCKER_PASS" | docker login ${REGISTRY} -u "$DOCKER_USER" --password-stdin
+            docker push ${API_IMAGE}:${TAG}
+            docker push ${API_IMAGE}:latest
+            docker push ${WEB_IMAGE}:${TAG}
+            docker push ${WEB_IMAGE}:latest
+            docker logout ${REGISTRY}
+          """
+        }
+      }
+    }
+
+    stage("Deploy on server") {
+      steps {
+        sshagent(credentials: ["${SSH_KEY_CREDS}"]) {
+          sh """
+            ssh -o StrictHostKeyChecking=no ${DEPLOY_USER}@${DEPLOY_HOST} '
+              set -e
+              mkdir -p ${DEPLOY_PATH}
+            '
+          """
+
+          // Kopiera compose-filen från repo till server (om du vill)
+          sh """
+            scp -o StrictHostKeyChecking=no docker-compose.yml ${DEPLOY_USER}@${DEPLOY_HOST}:${DEPLOY_PATH}/docker-compose.yml
+          """
+
+          // Deploy: pull + up -d
+          sshagent(credentials: ["${SSH_KEY_CREDS}"]) {
+            sh """
+              ssh -o StrictHostKeyChecking=no ${DEPLOY_USER}@${DEPLOY_HOST} '
+                set -e
+                cd ${DEPLOY_PATH}
+                docker compose pull
+                docker compose up -d --remove-orphans
+                docker image prune -f
+              '
+            """
+          }
+        }
+      }
+    }
+  }
+
+  post {
+    always {
+      sh "docker system prune -f || true"
+    }
+  }
+}
+

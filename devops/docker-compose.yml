@@ -1,0 +1,62 @@
+name: movekind
+
+services:
+  api:
+    platform: linux/amd64
+    container_name: movekind-api
+    build:
+      context: .
+      dockerfile: MoveKind.Umbraco/Dockerfile
+    environment:
+      # <-- mapping, inte sträng/array
+      ASPNETCORE_URLS: "http://+:8080;https://+:8443"
+      ASPNETCORE_ENVIRONMENT: "Production"
+      DOTNET_ROLL_FORWARD: "LatestMajor"
+      ASPNETCORE_Kestrel__Endpoints__Http__Url: "http://+:8080"
+      ASPNETCORE_Kestrel__Endpoints__Https__Url: "https://+:8443"
+      ASPNETCORE_Kestrel__Certificates__Default__Path: "/https/aspnetapp.pfx"
+      ASPNETCORE_Kestrel__Certificates__Default__Password: "pass123!"
+      CERT_DIR: "/https"
+      CERT_NAME: "aspnetapp"
+      CERT_PASSWORD: "pass123!"
+      CERT_DAYS: "365"
+      CERT_CN: "localhost"
+      ConnectionStrings__umbracoDbDSN: "Data Source=/app/umbraco/Data/Umbraco.sqlite.db;Cache=Shared;Foreign Keys=True;Pooling=True"
+
+    volumes:
+      # 👇 mounta din seedade DB
+      - ./docker/seed/Umbraco.sqlite.db:/app/umbraco/Data/Umbraco.sqlite.db
+      - ./docker/seed/Umbraco.sqlite.db-shm:/app/umbraco/Data/Umbraco.sqlite.db-shm
+      - ./docker/seed/Umbraco.sqlite.db-wal:/app/umbraco/Data/Umbraco.sqlite.db-wal
+      # 👇 mounta media
+      - ./docker/seed/media:/app/wwwroot/media
+      # 👇 cert (om du kör script som skapar pfx där)
+      - api_https:/https
+    ports:
+      - "8080:8080"
+      - "8443:8443"
+    healthcheck:
+      test: [ "CMD", "wget", "-qO-", "http://localhost:8080/umbraco" ]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+
+  web:
+    platform: linux/amd64
+    container_name: movekind-web
+    build:
+      context: .
+      dockerfile: movekind.web/Dockerfile
+    environment:
+      NODE_ENV: "production"
+      NEXT_PUBLIC_UMBRACO_URL: "https://api:8443"
+      NEXT_PUBLIC_UMBRACO_ORIGIN: "https://api:8443"
+    depends_on:
+      api:
+        condition: service_healthy
+    ports:
+      - "3000:3000"
+
+volumes:
+  umbraco_media:
+  api_https:
